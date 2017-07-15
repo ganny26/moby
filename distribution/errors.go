@@ -78,7 +78,7 @@ func TranslatePullError(err error, ref reference.Named) error {
 		switch v.Code {
 		case errcode.ErrorCodeDenied:
 			// ErrorCodeDenied is used when access to the repository was denied
-			newErr = errors.Errorf("repository %s not found: does not exist or no pull access", reference.FamiliarName(ref))
+			newErr = errors.Errorf("pull access denied for %s, repository does not exist or may require 'docker login'", reference.FamiliarName(ref))
 		case v2.ErrorCodeManifestUnknown:
 			newErr = errors.Errorf("manifest for %s not found", reference.FamiliarString(ref))
 		case v2.ErrorCodeNameUnknown:
@@ -113,7 +113,7 @@ func continueOnError(err error) bool {
 	case ImageConfigPullError:
 		return false
 	case error:
-		return !strings.Contains(err.Error(), strings.ToLower(syscall.ENOSPC.Error()))
+		return !strings.Contains(err.Error(), strings.ToLower(syscall.ESRCH.Error()))
 	}
 	// let's be nice and fallback if the error is a completely
 	// unexpected one.
