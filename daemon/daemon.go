@@ -23,12 +23,14 @@ import (
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/daemon/discovery"
 	"github.com/docker/docker/daemon/events"
 	"github.com/docker/docker/daemon/exec"
 	"github.com/docker/docker/daemon/logger"
+	"github.com/docker/docker/opts"
 	// register graph drivers
 	_ "github.com/docker/docker/daemon/graphdriver/register"
 	"github.com/docker/docker/daemon/initlayer"
@@ -42,7 +44,6 @@ import (
 	"github.com/docker/docker/migrate/v1"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/plugingetter"
-	"github.com/docker/docker/pkg/registrar"
 	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/pkg/truncindex"
@@ -104,13 +105,13 @@ type Daemon struct {
 	stores                map[string]daemonStore // By container target platform
 	PluginStore           *plugin.Store          // todo: remove
 	pluginManager         *plugin.Manager
-	nameIndex             *registrar.Registrar
 	linkIndex             *linkIndex
 	containerd            libcontainerd.Client
 	containerdRemote      libcontainerd.Remote
 	defaultIsolation      containertypes.Isolation // Default isolation mode on Windows
 	clusterProvider       cluster.Provider
 	cluster               Cluster
+	genericResources      []swarm.GenericResource
 	metricsPluginListener net.Listener
 
 	machineMemory uint64
@@ -448,8 +449,8 @@ func (daemon *Daemon) parents(c *container.Container) map[string]*container.Cont
 
 func (daemon *Daemon) registerLink(parent, child *container.Container, alias string) error {
 	fullName := path.Join(parent.Name, alias)
-	if err := daemon.nameIndex.Reserve(fullName, child.ID); err != nil {
-		if err == registrar.ErrNameReserved {
+	if err := daemon.containersReplica.ReserveName(fullName, child.ID); err != nil {
+		if err == container.ErrNameReserved {
 			logrus.Warnf("error registering link for %s, to %s, as alias %s, ignoring: %v", parent.ID, child.ID, alias, err)
 			return nil
 		}
@@ -568,6 +569,9 @@ func NewDaemon(config *config.Config, registryService registry.Service, containe
 		}
 	}()
 
+	if err := d.setGenericResources(config); err != nil {
+		return nil, err
+	}
 	// set up SIGUSR1 handler on Unix-like systems, or a Win32 global event
 	// on Windows to dump Go routine stacks
 	stackDumpDir := config.Root
@@ -622,6 +626,8 @@ func NewDaemon(config *config.Config, registryService registry.Service, containe
 		driverName := os.Getenv("DOCKER_DRIVER")
 		if driverName == "" {
 			driverName = config.GraphDriver
+		} else {
+			logrus.Infof("Setting the storage driver from the $DOCKER_DRIVER environment variable (%s)", driverName)
 		}
 		d.stores[runtime.GOOS] = daemonStore{graphDriver: driverName} // May still be empty. Layerstore init determines instead.
 	}
@@ -780,7 +786,6 @@ func NewDaemon(config *config.Config, registryService registry.Service, containe
 	d.seccompEnabled = sysInfo.Seccomp
 	d.apparmorEnabled = sysInfo.AppArmor
 
-	d.nameIndex = registrar.NewRegistrar()
 	d.linkIndex = newLinkIndex()
 	d.containerdRemote = containerdRemote
 
@@ -1034,6 +1039,17 @@ func prepareTempDir(rootDir string, rootIDs idtools.IDPair) (string, error) {
 func (daemon *Daemon) setupInitLayer(initPath string) error {
 	rootIDs := daemon.idMappings.RootPair()
 	return initlayer.Setup(initPath, rootIDs)
+}
+
+func (daemon *Daemon) setGenericResources(conf *config.Config) error {
+	genericResources, err := opts.ParseGenericResources(conf.NodeGenericResources)
+	if err != nil {
+		return err
+	}
+
+	daemon.genericResources = genericResources
+
+	return nil
 }
 
 func setDefaultMtu(conf *config.Config) {
