@@ -11,7 +11,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/net/context"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/docker/daemon/logger/jsonfilelog/multireader"
@@ -19,6 +18,7 @@ import (
 	"github.com/docker/docker/pkg/jsonlog"
 	"github.com/docker/docker/pkg/tailfile"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 const maxJSONDecodeRetry = 20000
@@ -137,8 +137,7 @@ func newSectionReader(f *os.File) (*io.SectionReader, error) {
 }
 
 func tailFile(f io.ReadSeeker, logWatcher *logger.LogWatcher, tail int, since time.Time) {
-	var rdr io.Reader
-	rdr = f
+	rdr := io.Reader(f)
 	if tail > 0 {
 		ls, err := tailfile.TailFile(f, tail)
 		if err != nil {
