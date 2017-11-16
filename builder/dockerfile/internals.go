@@ -25,15 +25,10 @@ import (
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/symlink"
 	"github.com/docker/docker/pkg/system"
+	"github.com/docker/go-connections/nat"
 	lcUser "github.com/opencontainers/runc/libcontainer/user"
 	"github.com/pkg/errors"
 )
-
-// For Windows only
-var pathBlacklist = map[string]bool{
-	"c:\\":        true,
-	"c:\\windows": true,
-}
 
 // Archiver defines an interface for copying files from one destination to
 // another using Tar/Untar.
@@ -89,7 +84,8 @@ func (b *Builder) commit(dispatchState *dispatchState, comment string) error {
 		return errors.New("Please provide a source image with `from` prior to commit")
 	}
 
-	runConfigWithCommentCmd := copyRunConfig(dispatchState.runConfig, withCmdComment(comment, b.platform))
+	optionsPlatform := system.ParsePlatform(b.options.Platform)
+	runConfigWithCommentCmd := copyRunConfig(dispatchState.runConfig, withCmdComment(comment, optionsPlatform.OS))
 	hit, err := b.probeCache(dispatchState, runConfigWithCommentCmd)
 	if err != nil || hit {
 		return err
@@ -128,7 +124,8 @@ func (b *Builder) commitContainer(dispatchState *dispatchState, id string, conta
 }
 
 func (b *Builder) exportImage(state *dispatchState, imageMount *imageMount, runConfig *container.Config) error {
-	newLayer, err := imageMount.Layer().Commit(b.platform)
+	optionsPlatform := system.ParsePlatform(b.options.Platform)
+	newLayer, err := imageMount.Layer().Commit(optionsPlatform.OS)
 	if err != nil {
 		return err
 	}
@@ -176,9 +173,10 @@ func (b *Builder) performCopy(state *dispatchState, inst copyInstruction) error 
 	commentStr := fmt.Sprintf("%s %s%s in %s ", inst.cmdName, chownComment, srcHash, inst.dest)
 
 	// TODO: should this have been using origPaths instead of srcHash in the comment?
+	optionsPlatform := system.ParsePlatform(b.options.Platform)
 	runConfigWithCommentCmd := copyRunConfig(
 		state.runConfig,
-		withCmdCommentString(commentStr, b.platform))
+		withCmdCommentString(commentStr, optionsPlatform.OS))
 	hit, err := b.probeCache(state, runConfigWithCommentCmd)
 	if err != nil || hit {
 		return err
@@ -189,7 +187,7 @@ func (b *Builder) performCopy(state *dispatchState, inst copyInstruction) error 
 		return errors.Wrapf(err, "failed to get destination image %q", state.imageID)
 	}
 
-	destInfo, err := createDestInfo(state.runConfig.WorkingDir, inst, imageMount, b.platform)
+	destInfo, err := createDestInfo(state.runConfig.WorkingDir, inst, imageMount, b.options.Platform)
 	if err != nil {
 		return err
 	}
@@ -388,14 +386,6 @@ func hashStringSlice(prefix string, slice []string) string {
 
 type runConfigModifier func(*container.Config)
 
-func copyRunConfig(runConfig *container.Config, modifiers ...runConfigModifier) *container.Config {
-	copy := *runConfig
-	for _, modifier := range modifiers {
-		modifier(&copy)
-	}
-	return &copy
-}
-
 func withCmd(cmd []string) runConfigModifier {
 	return func(runConfig *container.Config) {
 		runConfig.Cmd = cmd
@@ -441,11 +431,53 @@ func withEntrypointOverride(cmd []string, entrypoint []string) runConfigModifier
 	}
 }
 
+func copyRunConfig(runConfig *container.Config, modifiers ...runConfigModifier) *container.Config {
+	copy := *runConfig
+	copy.Cmd = copyStringSlice(runConfig.Cmd)
+	copy.Env = copyStringSlice(runConfig.Env)
+	copy.Entrypoint = copyStringSlice(runConfig.Entrypoint)
+	copy.OnBuild = copyStringSlice(runConfig.OnBuild)
+	copy.Shell = copyStringSlice(runConfig.Shell)
+
+	if copy.Volumes != nil {
+		copy.Volumes = make(map[string]struct{}, len(runConfig.Volumes))
+		for k, v := range runConfig.Volumes {
+			copy.Volumes[k] = v
+		}
+	}
+
+	if copy.ExposedPorts != nil {
+		copy.ExposedPorts = make(nat.PortSet, len(runConfig.ExposedPorts))
+		for k, v := range runConfig.ExposedPorts {
+			copy.ExposedPorts[k] = v
+		}
+	}
+
+	if copy.Labels != nil {
+		copy.Labels = make(map[string]string, len(runConfig.Labels))
+		for k, v := range runConfig.Labels {
+			copy.Labels[k] = v
+		}
+	}
+
+	for _, modifier := range modifiers {
+		modifier(&copy)
+	}
+	return &copy
+}
+
+func copyStringSlice(orig []string) []string {
+	if orig == nil {
+		return nil
+	}
+	return append([]string{}, orig...)
+}
+
 // getShell is a helper function which gets the right shell for prefixing the
 // shell-form of RUN, ENTRYPOINT and CMD instructions
-func getShell(c *container.Config, platform string) []string {
+func getShell(c *container.Config, os string) []string {
 	if 0 == len(c.Shell) {
-		return append([]string{}, defaultShellForPlatform(platform)[:]...)
+		return append([]string{}, defaultShellForOS(os)[:]...)
 	}
 	return append([]string{}, c.Shell[:]...)
 }
@@ -469,13 +501,15 @@ func (b *Builder) probeAndCreate(dispatchState *dispatchState, runConfig *contai
 	}
 	// Set a log config to override any default value set on the daemon
 	hostConfig := &container.HostConfig{LogConfig: defaultLogConfig}
-	container, err := b.containerManager.Create(runConfig, hostConfig, b.platform)
+	optionsPlatform := system.ParsePlatform(b.options.Platform)
+	container, err := b.containerManager.Create(runConfig, hostConfig, optionsPlatform.OS)
 	return container.ID, err
 }
 
 func (b *Builder) create(runConfig *container.Config) (string, error) {
 	hostConfig := hostConfigFromOptions(b.options)
-	container, err := b.containerManager.Create(runConfig, hostConfig, b.platform)
+	optionsPlatform := system.ParsePlatform(b.options.Platform)
+	container, err := b.containerManager.Create(runConfig, hostConfig, optionsPlatform.OS)
 	if err != nil {
 		return "", err
 	}

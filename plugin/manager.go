@@ -107,14 +107,10 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 	manager := &Manager{
 		config: config,
 	}
-	if err := os.MkdirAll(manager.config.Root, 0700); err != nil {
-		return nil, errors.Wrapf(err, "failed to mkdir %v", manager.config.Root)
-	}
-	if err := os.MkdirAll(manager.config.ExecRoot, 0700); err != nil {
-		return nil, errors.Wrapf(err, "failed to mkdir %v", manager.config.ExecRoot)
-	}
-	if err := os.MkdirAll(manager.tmpDir(), 0700); err != nil {
-		return nil, errors.Wrapf(err, "failed to mkdir %v", manager.tmpDir())
+	for _, dirName := range []string{manager.config.Root, manager.config.ExecRoot, manager.tmpDir()} {
+		if err := os.MkdirAll(dirName, 0700); err != nil {
+			return nil, errors.Wrapf(err, "failed to mkdir %v", dirName)
+		}
 	}
 
 	if err := setupRoot(manager.config.Root); err != nil {
@@ -379,11 +375,11 @@ func isEqualPrivilege(a, b types.PluginPrivilege) bool {
 	return reflect.DeepEqual(a.Value, b.Value)
 }
 
-func configToRootFS(c []byte) (*image.RootFS, layer.Platform, error) {
-	// TODO @jhowardmsft LCOW - Will need to revisit this. For now, calculate the platform.
-	platform := layer.Platform(runtime.GOOS)
+func configToRootFS(c []byte) (*image.RootFS, layer.OS, error) {
+	// TODO @jhowardmsft LCOW - Will need to revisit this. For now, calculate the operating system.
+	os := layer.OS(runtime.GOOS)
 	if system.LCOWSupported() {
-		platform = "linux"
+		os = "linux"
 	}
 	var pluginConfig types.PluginConfig
 	if err := json.Unmarshal(c, &pluginConfig); err != nil {
@@ -391,10 +387,10 @@ func configToRootFS(c []byte) (*image.RootFS, layer.Platform, error) {
 	}
 	// validation for empty rootfs is in distribution code
 	if pluginConfig.Rootfs == nil {
-		return nil, platform, nil
+		return nil, os, nil
 	}
 
-	return rootFSFromPlugin(pluginConfig.Rootfs), platform, nil
+	return rootFSFromPlugin(pluginConfig.Rootfs), os, nil
 }
 
 func rootFSFromPlugin(pluginfs *types.PluginConfigRootfs) *image.RootFS {

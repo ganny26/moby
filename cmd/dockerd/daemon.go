@@ -38,7 +38,7 @@ import (
 	"github.com/docker/docker/libcontainerd"
 	dopts "github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/authorization"
-	"github.com/docker/docker/pkg/jsonlog"
+	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/pidfile"
 	"github.com/docker/docker/pkg/plugingetter"
 	"github.com/docker/docker/pkg/signal"
@@ -94,7 +94,7 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 	}
 
 	logrus.SetFormatter(&logrus.TextFormatter{
-		TimestampFormat: jsonlog.RFC3339NanoFixed,
+		TimestampFormat: jsonmessage.RFC3339NanoFixed,
 		DisableColors:   cli.Config.RawLogs,
 		FullTimestamp:   true,
 	})
@@ -204,7 +204,11 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		return err
 	}
 
-	containerdRemote, err := libcontainerd.New(cli.getLibcontainerdRoot(), cli.getPlatformRemoteOptions()...)
+	rOpts, err := cli.getRemoteOptions()
+	if err != nil {
+		return fmt.Errorf("Failed to generate containerd options: %s", err)
+	}
+	containerdRemote, err := libcontainerd.New(filepath.Join(cli.Config.Root, "containerd"), filepath.Join(cli.Config.ExecRoot, "containerd"), rOpts...)
 	if err != nil {
 		return err
 	}
@@ -220,10 +224,6 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 
 	if err := cli.initMiddlewares(cli.api, serverConfig, pluginStore); err != nil {
 		logrus.Fatalf("Error creating middlewares: %v", err)
-	}
-
-	if system.LCOWSupported() {
-		logrus.Warnln("LCOW support is enabled - this feature is incomplete")
 	}
 
 	d, err := daemon.NewDaemon(cli.Config, registryService, containerdRemote, pluginStore)
@@ -480,22 +480,12 @@ func loadDaemonCliConfig(opts *daemonOptions) (*config.Config, error) {
 		logrus.Warnf(`The "-g / --graph" flag is deprecated. Please use "--data-root" instead`)
 	}
 
-	// Labels of the docker engine used to allow multiple values associated with the same key.
-	// This is deprecated in 1.13, and, be removed after 3 release cycles.
-	// The following will check the conflict of labels, and report a warning for deprecation.
-	//
-	// TODO: After 3 release cycles (17.12) an error will be returned, and labels will be
-	// sanitized to consolidate duplicate key-value pairs (config.Labels = newLabels):
-	//
-	// newLabels, err := daemon.GetConflictFreeLabels(config.Labels)
-	// if err != nil {
-	//	return nil, err
-	// }
-	// config.Labels = newLabels
-	//
-	if _, err := config.GetConflictFreeLabels(conf.Labels); err != nil {
-		logrus.Warnf("Engine labels with duplicate keys and conflicting values have been deprecated: %s", err)
+	// Check if duplicate label-keys with different values are found
+	newLabels, err := config.GetConflictFreeLabels(conf.Labels)
+	if err != nil {
+		return nil, err
 	}
+	conf.Labels = newLabels
 
 	// Regardless of whether the user sets it to true or false, if they
 	// specify TLSVerify at all then we need to turn on TLS
@@ -562,6 +552,17 @@ func (cli *DaemonCli) initMiddlewares(s *apiserver.Server, cfg *apiserver.Config
 	cli.Config.AuthzMiddleware = cli.authzMiddleware
 	s.UseMiddleware(cli.authzMiddleware)
 	return nil
+}
+
+func (cli *DaemonCli) getRemoteOptions() ([]libcontainerd.RemoteOption, error) {
+	opts := []libcontainerd.RemoteOption{}
+
+	pOpts, err := cli.getPlatformRemoteOptions()
+	if err != nil {
+		return nil, err
+	}
+	opts = append(opts, pOpts...)
+	return opts, nil
 }
 
 // validates that the plugins requested with the --authorization-plugin flag are valid AuthzDriver
