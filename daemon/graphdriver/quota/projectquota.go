@@ -58,6 +58,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	rsystem "github.com/opencontainers/runc/libcontainer/system"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -98,6 +99,14 @@ type Control struct {
 // project ids.
 //
 func NewControl(basePath string) (*Control, error) {
+	//
+	// If we are running in a user namespace quota won't be supported for
+	// now since makeBackingFsDev() will try to mknod().
+	//
+	if rsystem.RunningInUserNS() {
+		return nil, ErrQuotaNotSupported
+	}
+
 	//
 	// create backing filesystem device node
 	//
@@ -341,11 +350,17 @@ func makeBackingFsDev(home string) (string, error) {
 	backingFsBlockDev := path.Join(home, "backingFsBlockDev")
 	// Re-create just in case someone copied the home directory over to a new device
 	unix.Unlink(backingFsBlockDev)
-	if err := unix.Mknod(backingFsBlockDev, unix.S_IFBLK|0600, int(stat.Dev)); err != nil {
+	err := unix.Mknod(backingFsBlockDev, unix.S_IFBLK|0600, int(stat.Dev))
+	switch err {
+	case nil:
+		return backingFsBlockDev, nil
+
+	case unix.ENOSYS:
+		return "", ErrQuotaNotSupported
+
+	default:
 		return "", fmt.Errorf("Failed to mknod %s: %v", backingFsBlockDev, err)
 	}
-
-	return backingFsBlockDev, nil
 }
 
 func hasQuotaSupport(backingFsBlockDev string) (bool, error) {

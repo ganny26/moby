@@ -2312,48 +2312,6 @@ func (s *DockerSuite) TestRunModeIpcHost(c *check.C) {
 	}
 }
 
-func (s *DockerSuite) TestRunModeIpcContainer(c *check.C) {
-	// Not applicable on Windows as uses Unix-specific capabilities
-	testRequires(c, SameHostDaemon, DaemonIsLinux)
-
-	out, _ := dockerCmd(c, "run", "-d", "busybox", "sh", "-c", "echo -n test > /dev/shm/test && touch /dev/mqueue/toto && top")
-
-	id := strings.TrimSpace(out)
-	state := inspectField(c, id, "State.Running")
-	if state != "true" {
-		c.Fatal("Container state is 'not running'")
-	}
-	pid1 := inspectField(c, id, "State.Pid")
-
-	parentContainerIpc, err := os.Readlink(fmt.Sprintf("/proc/%s/ns/ipc", pid1))
-	if err != nil {
-		c.Fatal(err)
-	}
-
-	out, _ = dockerCmd(c, "run", fmt.Sprintf("--ipc=container:%s", id), "busybox", "readlink", "/proc/self/ns/ipc")
-	out = strings.Trim(out, "\n")
-	if parentContainerIpc != out {
-		c.Fatalf("IPC different with --ipc=container:%s %s != %s\n", id, parentContainerIpc, out)
-	}
-
-	catOutput, _ := dockerCmd(c, "run", fmt.Sprintf("--ipc=container:%s", id), "busybox", "cat", "/dev/shm/test")
-	if catOutput != "test" {
-		c.Fatalf("Output of /dev/shm/test expected test but found: %s", catOutput)
-	}
-
-	// check that /dev/mqueue is actually of mqueue type
-	grepOutput, _ := dockerCmd(c, "run", fmt.Sprintf("--ipc=container:%s", id), "busybox", "grep", "/dev/mqueue", "/proc/mounts")
-	if !strings.HasPrefix(grepOutput, "mqueue /dev/mqueue mqueue rw") {
-		c.Fatalf("Output of 'grep /proc/mounts' expected 'mqueue /dev/mqueue mqueue rw' but found: %s", grepOutput)
-	}
-
-	lsOutput, _ := dockerCmd(c, "run", fmt.Sprintf("--ipc=container:%s", id), "busybox", "ls", "/dev/mqueue")
-	lsOutput = strings.Trim(lsOutput, "\n")
-	if lsOutput != "toto" {
-		c.Fatalf("Output of 'ls /dev/mqueue' expected 'toto' but found: %s", lsOutput)
-	}
-}
-
 func (s *DockerSuite) TestRunModeIpcContainerNotExists(c *check.C) {
 	// Not applicable on Windows as uses Unix-specific capabilities
 	testRequires(c, DaemonIsLinux)
@@ -4283,6 +4241,17 @@ func (s *DockerSuite) TestRunCredentialSpecWellFormed(c *check.C) {
 // servicing event and verifying the event from Hyper-V-Compute
 func (s *DockerSuite) TestRunServicingContainer(c *check.C) {
 	testRequires(c, DaemonIsWindows, SameHostDaemon)
+
+	// This functionality does not exist in post-RS3 builds.
+	// Note we get the version number from the full build string, as Windows
+	// reports Windows 8 version 6.2 build 9200 from non-manifested binaries.
+	// Ref: https://msdn.microsoft.com/en-us/library/windows/desktop/ms724451(v=vs.85).aspx
+	v, err := kernel.GetKernelVersion()
+	c.Assert(err, checker.IsNil)
+	build, _ := strconv.Atoi(strings.Split(strings.SplitN(v.String(), " ", 3)[2][1:], ".")[0])
+	if build > 16299 {
+		c.Skip("Disabled on post-RS3 builds")
+	}
 
 	out := cli.DockerCmd(c, "run", "-d", testEnv.MinimalBaseImage(), "cmd", "/c", "mkdir c:\\programdata\\Microsoft\\Windows\\ContainerUpdates\\000_000_d99f45d0-ffc8-4af7-bd9c-ea6a62e035c9_200 && sc control cexecsvc 255").Combined()
 	containerID := strings.TrimSpace(out)
