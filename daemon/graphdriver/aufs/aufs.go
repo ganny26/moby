@@ -20,10 +20,11 @@ aufs driver directory structure
 
 */
 
-package aufs
+package aufs // import "github.com/docker/docker/daemon/graphdriver/aufs"
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -133,10 +134,6 @@ func Init(root string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 	}
 	// Create the root aufs driver dir
 	if err := idtools.MkdirAllAndChown(root, 0700, idtools.IDPair{UID: rootUID, GID: rootGID}); err != nil {
-		return nil, err
-	}
-
-	if err := mountpk.MakePrivate(root); err != nil {
 		return nil, err
 	}
 
@@ -506,7 +503,7 @@ func (a *Driver) DiffSize(id, parent string) (size int64, err error) {
 		return a.naiveDiff.DiffSize(id, parent)
 	}
 	// AUFS doesn't need the parent layer to calculate the diff size.
-	return directory.Size(path.Join(a.rootPath(), "diff", id))
+	return directory.Size(context.TODO(), path.Join(a.rootPath(), "diff", id))
 }
 
 // ApplyDiff extracts the changeset from the given diff into the
@@ -579,10 +576,7 @@ func (a *Driver) unmount(mountPath string) error {
 	if mounted, err := a.mounted(mountPath); err != nil || !mounted {
 		return err
 	}
-	if err := Unmount(mountPath); err != nil {
-		return err
-	}
-	return nil
+	return Unmount(mountPath)
 }
 
 func (a *Driver) mounted(mountpoint string) (bool, error) {
@@ -610,7 +604,7 @@ func (a *Driver) Cleanup() error {
 			logrus.Debugf("aufs error unmounting %s: %s", m, err)
 		}
 	}
-	return mountpk.Unmount(a.root)
+	return mountpk.RecursiveUnmount(a.root)
 }
 
 func (a *Driver) aufsMount(ro []string, rw, target, mountLabel string) (err error) {

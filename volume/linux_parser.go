@@ -1,4 +1,4 @@
-package volume
+package volume // import "github.com/docker/docker/volume"
 
 import (
 	"errors"
@@ -29,7 +29,7 @@ func linuxSplitRawSpec(raw string) ([]string, error) {
 func linuxValidateNotRoot(p string) error {
 	p = path.Clean(strings.Replace(p, `\`, `/`, -1))
 	if p == "/" {
-		return fmt.Errorf("invalid specification: destination can't be '/'")
+		return ErrVolumeTargetIsRoot
 	}
 	return nil
 }
@@ -83,7 +83,7 @@ func (p *linuxParser) validateMountConfigImpl(mnt *mount.Mount, validateBindSour
 		if validateBindSourceExists {
 			exists, _, _ := currentFileInfoProvider.fileInfo(mnt.Source)
 			if !exists {
-				return &errMountConfig{mnt, errBindNotExist}
+				return &errMountConfig{mnt, errBindSourceDoesNotExist(mnt.Source)}
 			}
 		}
 

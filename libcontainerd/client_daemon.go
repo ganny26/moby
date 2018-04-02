@@ -1,6 +1,6 @@
 // +build !windows
 
-package libcontainerd
+package libcontainerd // import "github.com/docker/docker/libcontainerd"
 
 import (
 	"context"
@@ -27,10 +27,11 @@ import (
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/errdefs"
+	containerderrors "github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/linux/runctypes"
 	"github.com/containerd/typeurl"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -113,8 +114,21 @@ type client struct {
 	containers map[string]*container
 }
 
+func (c *client) setRemote(remote *containerd.Client) {
+	c.Lock()
+	c.remote = remote
+	c.Unlock()
+}
+
+func (c *client) getRemote() *containerd.Client {
+	c.RLock()
+	remote := c.remote
+	c.RUnlock()
+	return remote
+}
+
 func (c *client) Version(ctx context.Context) (containerd.Version, error) {
-	return c.remote.Version(ctx)
+	return c.getRemote().Version(ctx)
 }
 
 func (c *client) Restore(ctx context.Context, id string, attachStdio StdioCallback) (alive bool, pid int, err error) {
@@ -145,7 +159,7 @@ func (c *client) Restore(ctx context.Context, id string, attachStdio StdioCallba
 		return attachStdio(dio)
 	}
 	t, err := ctr.Task(ctx, attachIO)
-	if err != nil && !errdefs.IsNotFound(errors.Cause(err)) {
+	if err != nil && !containerderrors.IsNotFound(err) {
 		return false, -1, err
 	}
 
@@ -181,17 +195,17 @@ func (c *client) Create(ctx context.Context, id string, ociSpec *specs.Spec, run
 
 	bdir, err := prepareBundleDir(filepath.Join(c.stateDir, id), ociSpec)
 	if err != nil {
-		return wrapSystemError(errors.Wrap(err, "prepare bundle dir failed"))
+		return errdefs.System(errors.Wrap(err, "prepare bundle dir failed"))
 	}
 
 	c.logger.WithField("bundle", bdir).WithField("root", ociSpec.Root.Path).Debug("bundle dir created")
 
-	cdCtr, err := c.remote.NewContainer(ctx, id,
+	cdCtr, err := c.getRemote().NewContainer(ctx, id,
 		containerd.WithSpec(ociSpec),
 		// TODO(mlaventure): when containerd support lcow, revisit runtime value
 		containerd.WithRuntime(fmt.Sprintf("io.containerd.runtime.v1.%s", runtime.GOOS), runtimeOptions))
 	if err != nil {
-		return err
+		return wrapError(err)
 	}
 
 	c.Lock()
@@ -229,7 +243,7 @@ func (c *client) Start(ctx context.Context, id, checkpointDir string, withStdin 
 		// remove the checkpoint when we're done
 		defer func() {
 			if cp != nil {
-				err := c.remote.ContentStore().Delete(context.Background(), cp.Digest)
+				err := c.getRemote().ContentStore().Delete(context.Background(), cp.Digest)
 				if err != nil {
 					c.logger.WithError(err).WithFields(logrus.Fields{
 						"ref":    checkpointDir,
@@ -272,7 +286,7 @@ func (c *client) Start(ctx context.Context, id, checkpointDir string, withStdin 
 			rio.Cancel()
 			rio.Close()
 		}
-		return -1, err
+		return -1, wrapError(err)
 	}
 
 	ctr.setTask(t)
@@ -286,7 +300,7 @@ func (c *client) Start(ctx context.Context, id, checkpointDir string, withStdin 
 				Error("failed to delete task after fail start")
 		}
 		ctr.setTask(nil)
-		return -1, err
+		return -1, wrapError(err)
 	}
 
 	return int(t.Pid()), nil
@@ -330,7 +344,7 @@ func (c *client) Exec(ctx context.Context, containerID, processID string, spec *
 	})
 	if err != nil {
 		close(stdinCloseSync)
-		return -1, err
+		return -1, wrapError(err)
 	}
 
 	ctr.addProcess(processID, p)
@@ -341,7 +355,7 @@ func (c *client) Exec(ctx context.Context, containerID, processID string, spec *
 	if err = p.Start(ctx); err != nil {
 		p.Delete(context.Background())
 		ctr.deleteProcess(processID)
-		return -1, err
+		return -1, wrapError(err)
 	}
 
 	return int(p.Pid()), nil
@@ -379,7 +393,7 @@ func (c *client) Pause(ctx context.Context, containerID string) error {
 		return err
 	}
 
-	return p.(containerd.Task).Pause(ctx)
+	return wrapError(p.(containerd.Task).Pause(ctx))
 }
 
 func (c *client) Resume(ctx context.Context, containerID string) error {
@@ -479,7 +493,7 @@ func (c *client) Delete(ctx context.Context, containerID string) error {
 	}
 
 	if err := ctr.ctr.Delete(ctx); err != nil {
-		return err
+		return wrapError(err)
 	}
 
 	if os.Getenv("LIBCONTAINERD_NOCLEAN") != "1" {
@@ -509,7 +523,7 @@ func (c *client) Status(ctx context.Context, containerID string) (Status, error)
 
 	s, err := t.Status(ctx)
 	if err != nil {
-		return StatusUnknown, err
+		return StatusUnknown, wrapError(err)
 	}
 
 	return Status(s.Status), nil
@@ -523,24 +537,24 @@ func (c *client) CreateCheckpoint(ctx context.Context, containerID, checkpointDi
 
 	img, err := p.(containerd.Task).Checkpoint(ctx)
 	if err != nil {
-		return err
+		return wrapError(err)
 	}
 	// Whatever happens, delete the checkpoint from containerd
 	defer func() {
-		err := c.remote.ImageService().Delete(context.Background(), img.Name())
+		err := c.getRemote().ImageService().Delete(context.Background(), img.Name())
 		if err != nil {
 			c.logger.WithError(err).WithField("digest", img.Target().Digest).
 				Warnf("failed to delete checkpoint image")
 		}
 	}()
 
-	b, err := content.ReadBlob(ctx, c.remote.ContentStore(), img.Target().Digest)
+	b, err := content.ReadBlob(ctx, c.getRemote().ContentStore(), img.Target().Digest)
 	if err != nil {
-		return wrapSystemError(errors.Wrapf(err, "failed to retrieve checkpoint data"))
+		return errdefs.System(errors.Wrapf(err, "failed to retrieve checkpoint data"))
 	}
 	var index v1.Index
 	if err := json.Unmarshal(b, &index); err != nil {
-		return wrapSystemError(errors.Wrapf(err, "failed to decode checkpoint data"))
+		return errdefs.System(errors.Wrapf(err, "failed to decode checkpoint data"))
 	}
 
 	var cpDesc *v1.Descriptor
@@ -551,17 +565,17 @@ func (c *client) CreateCheckpoint(ctx context.Context, containerID, checkpointDi
 		}
 	}
 	if cpDesc == nil {
-		return wrapSystemError(errors.Wrapf(err, "invalid checkpoint"))
+		return errdefs.System(errors.Wrapf(err, "invalid checkpoint"))
 	}
 
-	rat, err := c.remote.ContentStore().ReaderAt(ctx, cpDesc.Digest)
+	rat, err := c.getRemote().ContentStore().ReaderAt(ctx, cpDesc.Digest)
 	if err != nil {
-		return wrapSystemError(errors.Wrapf(err, "failed to get checkpoint reader"))
+		return errdefs.System(errors.Wrapf(err, "failed to get checkpoint reader"))
 	}
 	defer rat.Close()
 	_, err = archive.Apply(ctx, checkpointDir, content.NewReader(rat))
 	if err != nil {
-		return wrapSystemError(errors.Wrapf(err, "failed to read checkpoint reader"))
+		return errdefs.System(errors.Wrapf(err, "failed to read checkpoint reader"))
 	}
 
 	return err
@@ -707,7 +721,7 @@ func (c *client) processEventStream(ctx context.Context) {
 		}
 	}()
 
-	eventStream, err = c.remote.EventService().Subscribe(ctx, &eventsapi.SubscribeRequest{
+	eventStream, err = c.getRemote().EventService().Subscribe(ctx, &eventsapi.SubscribeRequest{
 		Filters: []string{
 			// Filter on both namespace *and* topic. To create an "and" filter,
 			// this must be a single, comma-separated string
@@ -717,6 +731,8 @@ func (c *client) processEventStream(ctx context.Context) {
 	if err != nil {
 		return
 	}
+
+	c.logger.WithField("namespace", c.namespace).Debug("processing event stream")
 
 	var oomKilled bool
 	for {
@@ -821,7 +837,7 @@ func (c *client) processEventStream(ctx context.Context) {
 }
 
 func (c *client) writeContent(ctx context.Context, mediaType, ref string, r io.Reader) (*types.Descriptor, error) {
-	writer, err := c.remote.ContentStore().Writer(ctx, ref, 0, "")
+	writer, err := c.getRemote().ContentStore().Writer(ctx, ref, 0, "")
 	if err != nil {
 		return nil, err
 	}
@@ -847,14 +863,14 @@ func wrapError(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case errdefs.IsNotFound(err):
-		return wrapNotFoundError(err)
+	case containerderrors.IsNotFound(err):
+		return errdefs.NotFound(err)
 	}
 
 	msg := err.Error()
 	for _, s := range []string{"container does not exist", "not found", "no such container"} {
 		if strings.Contains(msg, s) {
-			return wrapNotFoundError(err)
+			return errdefs.NotFound(err)
 		}
 	}
 	return err

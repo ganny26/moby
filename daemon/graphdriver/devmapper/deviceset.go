@@ -1,6 +1,6 @@
 // +build linux
 
-package devmapper
+package devmapper // import "github.com/docker/docker/daemon/graphdriver/devmapper"
 
 import (
 	"bufio"
@@ -355,10 +355,7 @@ func (devices *DeviceSet) saveMetadata(info *devInfo) error {
 	if err != nil {
 		return fmt.Errorf("devmapper: Error encoding metadata to json: %s", err)
 	}
-	if err := devices.writeMetaFile(jsonData, devices.metadataFile(info)); err != nil {
-		return err
-	}
-	return nil
+	return devices.writeMetaFile(jsonData, devices.metadataFile(info))
 }
 
 func (devices *DeviceSet) markDeviceIDUsed(deviceID int) {
@@ -889,11 +886,7 @@ func (devices *DeviceSet) takeSnapshot(hash string, baseInfo *devInfo, size uint
 		defer devicemapper.ResumeDevice(baseInfo.Name())
 	}
 
-	if err = devices.createRegisterSnapDevice(hash, baseInfo, size); err != nil {
-		return err
-	}
-
-	return nil
+	return devices.createRegisterSnapDevice(hash, baseInfo, size)
 }
 
 func (devices *DeviceSet) createRegisterSnapDevice(hash string, baseInfo *devInfo, size uint64) error {
@@ -1233,12 +1226,7 @@ func (devices *DeviceSet) setupBaseImage() error {
 			if err := devices.setupVerifyBaseImageUUIDFS(oldInfo); err != nil {
 				return err
 			}
-
-			if err := devices.checkGrowBaseDeviceFS(oldInfo); err != nil {
-				return err
-			}
-
-			return nil
+			return devices.checkGrowBaseDeviceFS(oldInfo)
 		}
 
 		logrus.Debug("devmapper: Removing uninitialized base image")
@@ -1259,11 +1247,7 @@ func (devices *DeviceSet) setupBaseImage() error {
 	}
 
 	// Create new base image device
-	if err := devices.createBaseImage(); err != nil {
-		return err
-	}
-
-	return nil
+	return devices.createBaseImage()
 }
 
 func setCloseOnExec(name string) {
@@ -2082,11 +2066,7 @@ func (devices *DeviceSet) deleteDevice(info *devInfo, syncDelete bool) error {
 		return err
 	}
 
-	if err := devices.deleteTransaction(info, syncDelete); err != nil {
-		return err
-	}
-
-	return nil
+	return devices.deleteTransaction(info, syncDelete)
 }
 
 // DeleteDevice will return success if device has been marked for deferred
@@ -2243,6 +2223,38 @@ func (devices *DeviceSet) cancelDeferredRemoval(info *devInfo) error {
 	return err
 }
 
+func (devices *DeviceSet) unmountAndDeactivateAll(dir string) {
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		logrus.Warnf("devmapper: unmountAndDeactivate: %s", err)
+		return
+	}
+
+	for _, d := range files {
+		if !d.IsDir() {
+			continue
+		}
+
+		name := d.Name()
+		fullname := path.Join(dir, name)
+
+		// We use MNT_DETACH here in case it is still busy in some running
+		// container. This means it'll go away from the global scope directly,
+		// and the device will be released when that container dies.
+		if err := unix.Unmount(fullname, unix.MNT_DETACH); err != nil && err != unix.EINVAL {
+			logrus.Warnf("devmapper: Shutdown unmounting %s, error: %s", fullname, err)
+		}
+
+		if devInfo, err := devices.lookupDevice(name); err != nil {
+			logrus.Debugf("devmapper: Shutdown lookup device %s, error: %s", name, err)
+		} else {
+			if err := devices.deactivateDevice(devInfo); err != nil {
+				logrus.Debugf("devmapper: Shutdown deactivate %s, error: %s", devInfo.Hash, err)
+			}
+		}
+	}
+}
+
 // Shutdown shuts down the device by unmounting the root.
 func (devices *DeviceSet) Shutdown(home string) error {
 	logrus.Debugf("devmapper: [deviceset %s] Shutdown()", devices.devicePrefix)
@@ -2264,45 +2276,7 @@ func (devices *DeviceSet) Shutdown(home string) error {
 	// will be killed and we will not get a chance to save deviceset
 	// metadata. Hence save this early before trying to deactivate devices.
 	devices.saveDeviceSetMetaData()
-
-	// ignore the error since it's just a best effort to not try to unmount something that's mounted
-	mounts, _ := mount.GetMounts()
-	mounted := make(map[string]bool, len(mounts))
-	for _, mnt := range mounts {
-		mounted[mnt.Mountpoint] = true
-	}
-
-	if err := filepath.Walk(path.Join(home, "mnt"), func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			return nil
-		}
-
-		if mounted[p] {
-			// We use MNT_DETACH here in case it is still busy in some running
-			// container. This means it'll go away from the global scope directly,
-			// and the device will be released when that container dies.
-			if err := unix.Unmount(p, unix.MNT_DETACH); err != nil {
-				logrus.Debugf("devmapper: Shutdown unmounting %s, error: %s", p, err)
-			}
-		}
-
-		if devInfo, err := devices.lookupDevice(path.Base(p)); err != nil {
-			logrus.Debugf("devmapper: Shutdown lookup device %s, error: %s", path.Base(p), err)
-		} else {
-			if err := devices.deactivateDevice(devInfo); err != nil {
-				logrus.Debugf("devmapper: Shutdown deactivate %s , error: %s", devInfo.Hash, err)
-			}
-		}
-
-		return nil
-	}); err != nil && !os.IsNotExist(err) {
-		devices.Unlock()
-		return err
-	}
-
+	devices.unmountAndDeactivateAll(path.Join(home, "mnt"))
 	devices.Unlock()
 
 	info, _ := devices.lookupDeviceWithLock("")

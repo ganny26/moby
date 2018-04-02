@@ -1,4 +1,4 @@
-package daemon
+package daemon // import "github.com/docker/docker/daemon"
 
 import (
 	"io/ioutil"
@@ -7,9 +7,9 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/docker/docker/api/errdefs"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
+	"github.com/docker/docker/errdefs"
 	_ "github.com/docker/docker/pkg/discovery/memory"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/truncindex"
@@ -19,8 +19,9 @@ import (
 	"github.com/docker/docker/volume/store"
 	"github.com/docker/go-connections/nat"
 	"github.com/docker/libnetwork"
+	"github.com/gotestyourself/gotestyourself/assert"
+	is "github.com/gotestyourself/gotestyourself/assert/cmp"
 	"github.com/pkg/errors"
-	"github.com/stretchr/testify/assert"
 )
 
 //
@@ -312,14 +313,14 @@ func TestValidateContainerIsolation(t *testing.T) {
 	d := Daemon{}
 
 	_, err := d.verifyContainerSettings(runtime.GOOS, &containertypes.HostConfig{Isolation: containertypes.Isolation("invalid")}, nil, false)
-	assert.EqualError(t, err, "invalid isolation 'invalid' on "+runtime.GOOS)
+	assert.Check(t, is.Error(err, "invalid isolation 'invalid' on "+runtime.GOOS))
 }
 
 func TestFindNetworkErrorType(t *testing.T) {
 	d := Daemon{}
-	_, err := d.FindUniqueNetwork("fakeNet")
+	_, err := d.FindNetwork("fakeNet")
 	_, ok := errors.Cause(err).(libnetwork.ErrNoSuchNetwork)
 	if !errdefs.IsNotFound(err) || !ok {
-		assert.Fail(t, "The FindNetwork method MUST always return an error that implements the NotFound interface and is ErrNoSuchNetwork")
+		t.Error("The FindNetwork method MUST always return an error that implements the NotFound interface and is ErrNoSuchNetwork")
 	}
 }

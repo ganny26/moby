@@ -1,4 +1,4 @@
-package daemon
+package daemon // import "github.com/docker/docker/daemon"
 
 import (
 	"fmt"
@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/network"
 	clustertypes "github.com/docker/docker/daemon/cluster/provider"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/plugingetter"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/libnetwork"
@@ -23,18 +24,28 @@ import (
 	"golang.org/x/net/context"
 )
 
+// PredefinedNetworkError is returned when user tries to create predefined network that already exists.
+type PredefinedNetworkError string
+
+func (pnr PredefinedNetworkError) Error() string {
+	return fmt.Sprintf("operation is not permitted on predefined %s network ", string(pnr))
+}
+
+// Forbidden denotes the type of this error
+func (pnr PredefinedNetworkError) Forbidden() {}
+
 // NetworkControllerEnabled checks if the networking stack is enabled.
 // This feature depends on OS primitives and it's disabled in systems like Windows.
 func (daemon *Daemon) NetworkControllerEnabled() bool {
 	return daemon.netController != nil
 }
 
-// FindUniqueNetwork returns a network based on:
+// FindNetwork returns a network based on:
 // 1. Full ID
 // 2. Full Name
 // 3. Partial ID
 // as long as there is no ambiguity
-func (daemon *Daemon) FindUniqueNetwork(term string) (libnetwork.Network, error) {
+func (daemon *Daemon) FindNetwork(term string) (libnetwork.Network, error) {
 	listByFullName := []libnetwork.Network{}
 	listByPartialID := []libnetwork.Network{}
 	for _, nw := range daemon.GetNetworks() {
@@ -52,13 +63,17 @@ func (daemon *Daemon) FindUniqueNetwork(term string) (libnetwork.Network, error)
 	case len(listByFullName) == 1:
 		return listByFullName[0], nil
 	case len(listByFullName) > 1:
-		return nil, fmt.Errorf("network %s is ambiguous (%d matches found based on name)", term, len(listByFullName))
+		return nil, errdefs.InvalidParameter(errors.Errorf("network %s is ambiguous (%d matches found on name)", term, len(listByFullName)))
 	case len(listByPartialID) == 1:
 		return listByPartialID[0], nil
 	case len(listByPartialID) > 1:
-		return nil, fmt.Errorf("network %s is ambiguous (%d matches found based on ID prefix)", term, len(listByPartialID))
+		return nil, errdefs.InvalidParameter(errors.Errorf("network %s is ambiguous (%d matches found based on ID prefix)", term, len(listByPartialID)))
 	}
-	return nil, libnetwork.ErrNoSuchNetwork(term)
+
+	// Be very careful to change the error type here, the
+	// libnetwork.ErrNoSuchNetwork error is used by the controller
+	// to retry the creation of the network as managed through the swarm manager
+	return nil, errdefs.NotFound(libnetwork.ErrNoSuchNetwork(term))
 }
 
 // GetNetworkByID function returns a network whose ID matches the given ID.
@@ -207,6 +222,8 @@ func (daemon *Daemon) releaseIngress(id string) {
 		return
 	}
 
+	daemon.deleteLoadBalancerSandbox(n)
+
 	if err := n.Delete(); err != nil {
 		logrus.Errorf("Failed to delete ingress network %s: %v", n.ID(), err)
 		return
@@ -262,9 +279,8 @@ func (daemon *Daemon) CreateNetwork(create types.NetworkCreateRequest) (*types.N
 }
 
 func (daemon *Daemon) createNetwork(create types.NetworkCreateRequest, id string, agent bool) (*types.NetworkCreateResponse, error) {
-	if runconfig.IsPreDefinedNetwork(create.Name) && !agent {
-		err := fmt.Errorf("%s is a pre-defined network and cannot be created", create.Name)
-		return nil, notAllowedError{err}
+	if runconfig.IsPreDefinedNetwork(create.Name) {
+		return nil, PredefinedNetworkError(create.Name)
 	}
 
 	var warning string
@@ -522,7 +538,7 @@ func (daemon *Daemon) deleteLoadBalancerSandbox(n libnetwork.Network) {
 func (daemon *Daemon) deleteNetwork(nw libnetwork.Network, dynamic bool) error {
 	if runconfig.IsPreDefinedNetwork(nw.Name()) && !dynamic {
 		err := fmt.Errorf("%s is a pre-defined network and cannot be removed", nw.Name())
-		return notAllowedError{err}
+		return errdefs.Forbidden(err)
 	}
 
 	if dynamic && !nw.Info().Dynamic() {
@@ -532,7 +548,7 @@ func (daemon *Daemon) deleteNetwork(nw libnetwork.Network, dynamic bool) error {
 			return nil
 		}
 		err := fmt.Errorf("%s is not a dynamic network", nw.Name())
-		return notAllowedError{err}
+		return errdefs.Forbidden(err)
 	}
 
 	if err := nw.Delete(); err != nil {
