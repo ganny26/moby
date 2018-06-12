@@ -24,7 +24,6 @@ import (
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/transport"
 )
 
 const (
@@ -165,21 +164,30 @@ type Dispatcher struct {
 }
 
 // New returns Dispatcher with cluster interface(usually raft.Node).
-func New(cluster Cluster, c *Config, dp *drivers.DriverProvider, securityConfig *ca.SecurityConfig) *Dispatcher {
+func New() *Dispatcher {
 	d := &Dispatcher{
-		dp:                    dp,
-		nodes:                 newNodeStore(c.HeartbeatPeriod, c.HeartbeatEpsilon, c.GracePeriodMultiplier, c.RateLimitPeriod),
 		downNodes:             newNodeStore(defaultNodeDownPeriod, 0, 1, 0),
-		store:                 cluster.MemoryStore(),
-		cluster:               cluster,
 		processUpdatesTrigger: make(chan struct{}, 1),
-		config:                c,
-		securityConfig:        securityConfig,
 	}
 
 	d.processUpdatesCond = sync.NewCond(&d.processUpdatesLock)
 
 	return d
+}
+
+// Init is used to initialize the dispatcher and
+// is typically called before starting the dispatcher
+// when a manager becomes a leader.
+// The dispatcher is a grpc server, and unlike other components,
+// it can't simply be recreated on becoming a leader.
+// This function ensures the dispatcher restarts with a clean slate.
+func (d *Dispatcher) Init(cluster Cluster, c *Config, dp *drivers.DriverProvider, securityConfig *ca.SecurityConfig) {
+	d.cluster = cluster
+	d.config = c
+	d.securityConfig = securityConfig
+	d.dp = dp
+	d.store = cluster.MemoryStore()
+	d.nodes = newNodeStore(c.HeartbeatPeriod, c.HeartbeatEpsilon, c.GracePeriodMultiplier, c.RateLimitPeriod)
 }
 
 func getWeightedPeers(cluster Cluster) []*api.WeightedPeer {
@@ -333,6 +341,7 @@ func (d *Dispatcher) Stop() error {
 	// cancelled and should fail organically.
 	d.rpcRW.Lock()
 	d.nodes.Clean()
+	d.downNodes.Clean()
 	d.rpcRW.Unlock()
 
 	d.processUpdatesLock.Lock()
@@ -689,6 +698,7 @@ func (d *Dispatcher) processUpdates(ctx context.Context) {
 				task.Status = *status
 				task.Status.AppliedBy = d.securityConfig.ClientTLSCreds.NodeID()
 				task.Status.AppliedAt = ptypes.MustTimestampProto(time.Now())
+				logger.Debugf("state for task %v updated to %v", task.GetID(), task.Status.State)
 				if err := store.UpdateTask(tx, task); err != nil {
 					logger.WithError(err).Error("failed to update task status")
 					return nil
@@ -1257,16 +1267,6 @@ func (d *Dispatcher) Session(r *api.SessionRequest, stream api.Dispatcher_Sessio
 
 	// disconnectNode is a helper forcibly shutdown connection
 	disconnectNode := func() error {
-		// force disconnect by shutting down the stream.
-		transportStream, ok := transport.StreamFromContext(stream.Context())
-		if ok {
-			// if we have the transport stream, we can signal a disconnect
-			// in the client.
-			if err := transportStream.ServerTransport().Close(); err != nil {
-				log.WithError(err).Error("session end")
-			}
-		}
-
 		log.Infof("dispatcher session dropped, marking node %s down", nodeID)
 		if err := d.markNodeNotReady(nodeID, api.NodeStatus_DISCONNECTED, "node is currently trying to find new manager"); err != nil {
 			log.WithError(err).Error("failed to remove node")
