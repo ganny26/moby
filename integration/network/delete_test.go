@@ -8,9 +8,9 @@ import (
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/integration/internal/network"
 	"github.com/docker/docker/internal/test/request"
-	"github.com/gotestyourself/gotestyourself/assert"
-	is "github.com/gotestyourself/gotestyourself/assert/cmp"
-	"github.com/gotestyourself/gotestyourself/skip"
+	"gotest.tools/assert"
+	is "gotest.tools/assert/cmp"
+	"gotest.tools/skip"
 )
 
 func containsNetwork(nws []types.NetworkResource, networkID string) bool {
@@ -42,6 +42,24 @@ func createAmbiguousNetworks(t *testing.T) (string, string, string) {
 	assert.Check(t, is.Equal(true, containsNetwork(nws, idPrefixNet)), "failed to create network idPrefixNet")
 	assert.Check(t, is.Equal(true, containsNetwork(nws, fullIDNet)), "failed to create network fullIDNet")
 	return testNet, idPrefixNet, fullIDNet
+}
+
+func TestNetworkCreateDelete(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType != "linux")
+	defer setupTest(t)()
+	client := request.NewAPIClient(t)
+	ctx := context.Background()
+
+	netName := "testnetwork_" + t.Name()
+	network.CreateNoError(t, ctx, client, netName,
+		network.WithCheckDuplicate(),
+	)
+	assert.Check(t, IsNetworkAvailable(client, netName))
+
+	// delete the network and make sure it is deleted
+	err := client.NetworkRemove(ctx, netName)
+	assert.NilError(t, err)
+	assert.Check(t, IsNetworkNotAvailable(client, netName))
 }
 
 // TestDockerNetworkDeletePreferID tests that if a network with a name
